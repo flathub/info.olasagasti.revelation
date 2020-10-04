@@ -9,9 +9,6 @@
         "--socket=fallback-x11",
         "--socket=wayland",
         "--filesystem=xdg-run/gvfs",
-        "--filesystem=home",
-        "--talk-name=org.gtk.vfs",
-        "--talk-name=org.gtk.vfs.*",
         "--talk-name=org.gnome.ScreenSaver"
     ],
     "modules" : [
@@ -45,15 +42,12 @@
         },
         {
             "name" : "revelation",
-            "buildsystem" : "autotools",
-            "config-opts": [
-                "--disable-mime-update"
-            ],
+            "buildsystem" : "meson",
             "sources" : [
                 {
                     "type" : "archive",
-                    "url" : "https://github.com/mikelolasagasti/revelation/releases/download/revelation-0.5.3/revelation-0.5.3.tar.xz",
-                    "sha256" : "8976644b8904db179f5927ea9045c5082faefdfecf079845ca081321935bdfac"
+                    "url" : "https://github.com/mikelolasagasti/revelation/releases/download/revelation-0.5.4/revelation-0.5.4.tar.xz",
+                    "sha256" : "880a90c3c1d317fbf617809f2bb24a8752cce241248fb681812e2757c9e17fe2"
                 }
             ]
         }
