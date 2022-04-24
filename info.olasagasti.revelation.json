@@ -1,7 +1,7 @@
 {
     "app-id": "info.olasagasti.revelation",
     "runtime" : "org.gnome.Platform",
-    "runtime-version" : "40",
+    "runtime-version" : "42",
     "sdk" : "org.gnome.Sdk",
     "command" : "revelation",
     "finish-args" : [
@@ -21,8 +21,8 @@
             "sources" : [
                 {
                     "type" : "archive",
-                    "url" : "https://github.com/libpwquality/libpwquality/releases/download/libpwquality-1.4.2/libpwquality-1.4.2.tar.bz2",
-                    "sha256" : "5263e09ee62269c092f790ac159112aed3e66826a795e3afec85fdeac4281c8e"
+                    "url" : "https://github.com/libpwquality/libpwquality/releases/download/libpwquality-1.4.4/libpwquality-1.4.4.tar.bz2",
+                    "sha256" : "d43baf23dc6887fe8f8e9b75cabaabc5f4bbbaa0f9eff44278d276141752a545"
                 }
             ]
         },
@@ -30,7 +30,7 @@
             "name" : "pycryptodomex",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} pycryptodomex"
+                "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} pycryptodomex "
             ],
             "sources" : [
                 {
@@ -41,13 +41,27 @@
             ]
         },
         {
+            "name" : "defusedxml",
+            "buildsystem": "simple",
+            "build-commands": [
+                "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} defusedxml"
+            ],
+            "sources" : [
+                {
+                    "type": "file",
+                    "url": "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz",
+                    "sha256": "1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69"
+                }
+            ]
+        },
+        {
             "name" : "revelation",
             "buildsystem" : "meson",
             "sources" : [
                 {
                     "type" : "archive",
-                    "url" : "https://github.com/mikelolasagasti/revelation/releases/download/revelation-0.5.4/revelation-0.5.4.tar.xz",
-                    "sha256" : "880a90c3c1d317fbf617809f2bb24a8752cce241248fb681812e2757c9e17fe2"
+                    "url" : "https://github.com/mikelolasagasti/revelation/releases/download/revelation-0.5.5/revelation-0.5.5.tar.xz",
+                    "sha256" : "a20c4191595466dc90b90b0f7c4615a599974327152a4d2af87f506134ddce8f"
                 }
             ]
         }
