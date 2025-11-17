@@ -1,0 +1,738 @@
+From 66b35b414ec5eb14d6f62d72ae2a95d82386c14b Mon Sep 17 00:00:00 2001
+From: Mikel Olasagasti Uranga <mikel@olasagasti.info>
+Date: Mon, 17 Nov 2025 12:43:13 +0100
+Subject: [PATCH] flatpak: Add portal compatibility and modernize file handling
+
+This change makes Revelation fully compatible with Flatpak document
+portals and prevents internal portal paths (such as /run/user/*/doc/*)
+from leaking into the UI.
+
+The file handling layer is modernized to rely consistently on GIO, with
+new helpers that provide user-friendly display names and display paths.
+Portal document URIs are now mapped to their basename for dialogs, while
+local files continue to show their full native paths in the statusbar.
+
+Statusbar, dialogs, file-changed notifications and error messages have
+all been updated to use these safe display helpers. File monitoring and
+load/save paths internally continue to use canonical URIs.
+
+This prepares the codebase for a future GTK4 migration, where handling
+GFile objects directly will further simplify the IO layer and eliminate
+the need for path/URI normalization helpers.
+
+Fixes #94 #100
+
+Signed-off-by: Mikel Olasagasti Uranga <mikel@olasagasti.info>
+---
+ po/POTFILES.in    |   1 +
+ src/lib/dialog.py |  33 +++--
+ src/lib/io.py     | 306 ++++++++++++++++++++++++++++++++++++++--------
+ src/revelation.py |  57 ++++++---
+ 4 files changed, 320 insertions(+), 77 deletions(-)
+
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index e2c9096..8d4453e 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -26,6 +26,7 @@ src/lib/config.py.in
+ src/lib/datahandler/xhtml.py
+ src/lib/dialog.py
+ src/lib/entry.py
++src/lib/io.py
+ src/lib/ui.py
+ src/lib/util.py
+ src/revelation.py
+diff --git a/src/lib/dialog.py b/src/lib/dialog.py
+index 66e2920..27ea879 100644
+--- a/src/lib/dialog.py
++++ b/src/lib/dialog.py
+@@ -219,8 +219,10 @@ class FileChanged(Warning):
+     "Notifies about changed file"
+ 
+     def __init__(self, parent, filename):
++        # Ensure filename is a display name, not a raw URI or portal path
++        display_name = io.file_get_display_name(filename) if filename else _("Untitled file")
+         Warning.__init__(
+-            self, parent, _('File has changed'), _('The current file \'%s\' has changed. Do you want to reload it?') % filename
++            self, parent, _('File has changed'), _('The current file \'%s\' has changed. Do you want to reload it?') % display_name
+         )
+ 
+         self.add_button(_("_Cancel"), Gtk.ResponseType.CANCEL)
+@@ -307,9 +309,11 @@ class FileReplace(Warning):
+     "Asks for confirmation when replacing a file"
+ 
+     def __init__(self, parent, file):
++        # Ensure filename is a display name, not a raw URI or portal path
++        display_name = io.file_get_display_name(file) if file else _("Untitled file")
+         Warning.__init__(
+             self, parent, _('Replace existing file?'),
+-            _('The file \'%s\' already exists - do you wish to replace this file?') % file
++            _('The file \'%s\' already exists - do you wish to replace this file?') % display_name
+         )
+ 
+         self.add_button(_("_Cancel"), Gtk.ResponseType.CANCEL)
+@@ -372,15 +376,20 @@ class FileSelector(Gtk.FileChooserNative):
+         self.inputsection.append_widget(title, widget)
+ 
+     def get_filename(self):
+-        "Returns the file URI"
++        "Returns the file URI (for portal compatibility)"
+ 
+-        uri = self.get_uri()
++        return self.get_uri()
++
++    def get_file_path(self):
++        "Returns the file path (for backward compatibility)"
+ 
++        uri = self.get_uri()
+         if uri is None:
+             return None
+-
+-        else:
++        if uri.startswith('file://'):
+             return io.file_normpath(urllib.parse.unquote(uri))
++        # For portal URIs, we can't convert to path
++        return None
+ 
+     def run(self):
+         "Displays and runs the file selector, returns the filename"
+@@ -511,7 +520,9 @@ class SaveFileSelector(FileSelector):
+         "Handles confirm-overwrite signals"
+ 
+         try:
+-            FileReplace(self, io.file_normpath(self.get_uri())).run()
++            # Always use display name for UI - never show raw URIs or portal paths to users
++            display_name = io.file_get_display_name(self.get_uri())
++            FileReplace(self, display_name).run()
+ 
+         except CancelError:
+             return Gtk.FileChooserConfirmation.SELECT_AGAIN
+@@ -703,9 +714,11 @@ class PasswordOpen(Password):
+     "Password dialog for opening files"
+ 
+     def __init__(self, parent, filename):
++        # Ensure filename is a display name, not a raw URI or portal path
++        display_name = io.file_get_display_name(filename) if filename else _("Untitled file")
+         Password.__init__(
+             self, parent, _('Enter file password'),
+-            _('The file “%s” is encrypted. Please enter the file password to open it.') % filename,
++            _('The file "%s" is encrypted. Please enter the file password to open it.') % display_name,
+             _("_Open")
+         )
+ 
+@@ -742,9 +755,11 @@ class PasswordSave(Password):
+     "Password dialog for saving data"
+ 
+     def __init__(self, parent, filename):
++        # Ensure filename is a display name, not a raw URI or portal path
++        display_name = io.file_get_display_name(filename) if filename else _("Untitled file")
+         Password.__init__(
+             self, parent, _('Enter password for file'),
+-            _('Please enter a password for the file \'%s\'. You will need this password to open the file at a later time.') % filename,
++            _('Please enter a password for the file \'%s\'. You will need this password to open the file at a later time.') % display_name,
+             _("_Save")
+         )
+ 
+diff --git a/src/lib/io.py b/src/lib/io.py
+index fce8cfd..997ef7e 100644
+--- a/src/lib/io.py
++++ b/src/lib/io.py
+@@ -5,6 +5,25 @@
+ #
+ # Module for IO-related functionality
+ #
++# TODO GTK4 Migration Notes:
++# ===========================
++# This module currently uses URI strings (self.__uri) for file handling.
++# For GTK4 migration, consider storing Gio.File objects directly:
++#
++# Benefits:
++# - Eliminates file_normpath() and as_gfile() conversion overhead
++# - GFile handles paths/URIs transparently - no ad-hoc detection needed
++# - Aligns with GTK4 best practices (GFile is the standard abstraction)
++# - Simplifies all file operations (read, write, monitor, etc.)
++# - Better type safety and clearer code
++#
++# Migration path:
++# 1. Change DataFile.__uri to DataFile.__gfile (Gio.File)
++# 2. Convert paths/URIs to GFile immediately in public API methods
++# 3. Remove file_normpath() - GFile handles normalization
++# 4. Remove as_gfile() - convert directly with Gio.File.new_for_path/uri()
++# 5. Update all file operations to work with GFile objects directly
++# 6. Keep public API accepting paths/URIs for backward compatibility
+ #
+ # Copyright (c) 2003-2006 Erik Grinaker
+ #
+@@ -25,14 +44,24 @@
+ 
+ from . import datahandler
+ 
++import gettext
+ import os.path
+ import re
+ from gi.repository import Gio, GObject, GLib
+ 
++_ = gettext.gettext
++
+ 
+ class DataFile(GObject.GObject):
+     "Handles data files"
+ 
++    # TODO GTK4: Migrate to store Gio.File objects directly instead of URI strings
++    # - Change self.__uri to self.__gfile (Gio.File)
++    # - Convert paths/URIs to GFile immediately in set_file()
++    # - get_file() returns self.__gfile.get_uri() if needed, or the GFile object
++    # - This eliminates need for file_normpath() and as_gfile() conversions
++    # - Simplifies all file operations and aligns with GTK4 best practices
++
+     def __init__(self, handler):
+         GObject.GObject.__init__(self)
+ 
+@@ -44,16 +73,25 @@ class DataFile(GObject.GObject):
+         self.set_handler(handler)
+ 
+     def __str__(self):
+-        return self.get_file() or ""
++        # Return display name for string representation (user-friendly)
++        return self.get_file_display_name() or ""
+ 
+     def __cb_monitor(self, monitor_uri, info_uri, event, data = None):
+         "Callback for file monitoring"
+         if event == Gio.FileMonitorEvent.CHANGED:
+-            self.emit("content-changed", self.get_file())
++            # Emit display name for UI, not raw URI
++            self.emit("content-changed", self.get_file_display_name())
+ 
+     def __monitor(self, file):
+         "Starts monitoring a file"
+ 
++        # TODO GTK4: If using GFile, this becomes:
++        #   def __monitor(self, gfile):
++        #       self.__monitor_stop()
++        #       if gfile is not None:
++        #           self.__monitorhandle = gfile.monitor_file(...)
++        #   No need for file_monitor() helper
++
+         self.__monitor_stop()
+ 
+         if file is not None:
+@@ -73,9 +111,26 @@ class DataFile(GObject.GObject):
+         self.set_file(None)
+ 
+     def get_file(self):
+-        "Gets the current file"
++        "Gets the current file URI"
++
++        return self.__uri
++
++    def get_file_display_name(self):
++        "Gets a user-friendly display name for the current file. Never returns portal paths or raw URIs."
++
++        return file_get_display_name(self.__uri)
+ 
+-        return self.__uri and re.sub("^file://", "", str(self.__uri)) or None
++    def get_file_display_path(self):
++        "Gets a user-friendly full path for statusbar messages. Shows full path when available, filename for portal documents."
++
++        return file_get_display_path(self.__uri)
++
++    def get_file_path(self):
++        "Gets the current file path (for backward compatibility)"
++
++        if self.__uri and self.__uri.startswith('file://'):
++            return re.sub("^file://", "", str(self.__uri))
++        return None
+ 
+     def get_handler(self):
+         "Gets the current handler"
+@@ -87,11 +142,18 @@ class DataFile(GObject.GObject):
+ 
+         return self.__password
+ 
+-    def load(self, file, password = None, pwgetter = None):
++    def load(self, file_or_uri, password = None, pwgetter = None):
+         "Loads a file"
+ 
+-        file = file_normpath(file)
+-        data = file_read(file)
++        # TODO GTK4: Simplify - convert to GFile once, use throughout:
++        #   gfile = as_gfile(file_or_uri) if not isinstance(file_or_uri, Gio.File) else file_or_uri
++        #   data = gfile.load_contents()[1]  # Direct GFile operation
++        #   self.__gfile = gfile
++        #   No need for file_normpath() or intermediate URI conversions
++
++        # file_normpath now preserves URIs, so we can pass it directly
++        file_or_uri = file_normpath(file_or_uri)
++        data = file_read(file_or_uri)
+ 
+         if self.__handler is None:
+             self.__handler = datahandler.detect_handler(data)()
+@@ -104,13 +166,19 @@ class DataFile(GObject.GObject):
+         entrystore = self.__handler.import_data(data, password)
+ 
+         self.set_password(password)
+-        self.set_file(file)
++        self.set_file(file_or_uri)
+ 
+         return entrystore
+ 
+     def save(self, entrystore, file, password = None):
+         "Saves an entrystore to a file"
+ 
++        # TODO GTK4: If using GFile, this becomes:
++        #   gfile = as_gfile(file) if not isinstance(file, Gio.File) else file
++        #   gfile.replace_contents(...)  # Direct operation
++        #   self.__gfile = gfile
++        #   self.__monitor(gfile)  # Pass GFile directly
++
+         self.__monitor_stop()
+         file_write(file, self.__handler.export_data(entrystore, password))
+ 
+@@ -120,16 +188,41 @@ class DataFile(GObject.GObject):
+         self.set_password(password)
+         self.set_file(file)
+ 
+-    def set_file(self, file):
++    def set_file(self, file_or_uri):
+         "Sets the current file"
+ 
+-        uri = file is not None and file_normpath(file) or None
++        # TODO GTK4: Simplify this - convert to GFile immediately:
++        #   if file_or_uri is None:
++        #       self.__gfile = None
++        #   else:
++        #       self.__gfile = as_gfile(file_or_uri)  # or Gio.File.new_for_path/uri directly
++        #   self.emit("changed", self.__gfile.get_uri() if self.__gfile else None)
++
++        # If it's already a file:// URI, use it; otherwise convert path to file:// URI
++        if file_or_uri is None:
++            uri = None
++        elif file_or_uri.startswith("file://"):
++            uri = file_or_uri
++        else:
++            # Convert path to file:// URI
++            path = file_normpath(file_or_uri)
++            if path:
++                gfile = as_gfile(path)
++                if gfile:
++                    uri = gfile.get_uri()
++                else:
++                    uri = None
++            else:
++                uri = None
+ 
+         if self.__uri != uri:
+             self.__uri = uri
+-            self.emit("changed", file)
++            # Emit the canonical URI, not the original input
++            self.emit("changed", uri)
+ 
+-            self.__monitor(file)
++            # Monitor the canonical URI, not the original input
++            # This ensures we're monitoring the actual file that's stored
++            self.__monitor(uri)
+ 
+     def set_handler(self, handler):
+         "Sets and initializes the current data handler"
+@@ -149,32 +242,54 @@ GObject.signal_new("content-changed", DataFile, GObject.SignalFlags.ACTION,
+                    GObject.TYPE_BOOLEAN, (str,))
+ 
+ 
+-def file_exists(file):
++def as_gfile(file_or_uri):
++    "Converts a file path or URI to a Gio.File object"
++
++    # TODO GTK4: This helper can be removed if DataFile stores GFile directly
++    # Public API can accept paths/URIs and convert immediately to GFile
++    # All internal operations work with GFile objects
++
++    if not file_or_uri:
++        return None
++
++    if file_or_uri.startswith("file://"):
++        return Gio.File.new_for_uri(file_or_uri)
++    return Gio.File.new_for_path(file_or_uri)
++
++
++def file_exists(file_or_uri):
+     "Checks if a file exists"
+ 
+-    if file is None:
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
+         return False
+-
+-    return Gio.File.new_for_path(file).query_exists()
++    return gfile.query_exists()
+ 
+ 
+-def file_is_local(file):
++def file_is_local(file_or_uri):
+     "Checks if a file is on a local filesystem"
+ 
+-    if file is None:
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
+         return False
++    return gfile.get_uri_scheme() == 'file'
+ 
+-    return Gio.File.new_for_path(file).get_uri_scheme() == 'file'
+ 
++def file_monitor(file_or_uri, callback):
++    "Starts monitoring a file. Returns None if monitoring is not supported (e.g., portal documents)"
+ 
+-def file_monitor(file, callback):
+-    "Starts monitoring a file"
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
++        return None
+ 
+     try:
+-        handle = Gio.File.new_for_path(file).monitor_file(Gio.FileMonitorFlags.NONE, None)
++        handle = gfile.monitor_file(Gio.FileMonitorFlags.NONE, None)
+         handle.connect('changed', callback)
+         return handle
+     except GLib.GError:
++        # Monitoring may not be supported for portal documents or other reasons
++        # This is expected and fine - autosave will still work
++        # Return None to indicate monitoring is not available
+         return None
+ 
+ 
+@@ -184,52 +299,145 @@ def file_monitor_cancel(handle):
+     handle.cancel()
+ 
+ 
+-def file_normpath(file):
+-    "Normalizes a file path"
++def file_normpath(file_or_uri):
++    "Normalizes a file path or preserves file:// URIs"
+ 
+-    if file in (None, ""):
+-        return ""
++    # TODO GTK4: This function can be removed entirely
++    # - GFile handles paths and URIs transparently
++    # - No need to normalize before creating GFile objects
++    # - GFile.new_for_path() and GFile.new_for_uri() handle all cases
++    # - Only kept for backward compatibility with existing code that expects normalized paths
+ 
+-    file = re.sub("^file:/{,2}", "", file)
+-    file = os.path.expanduser(file)
++    if not file_or_uri:
++        return ""
+ 
+-    if not re.match("^[a-zA-Z]+://", file) and file[0] != "/":
+-        file = os.path.abspath(file)
++    # Preserve file:// URIs as-is
++    if file_or_uri.startswith("file://"):
++        return file_or_uri
+ 
+-    # Does URI() do anything useful with the input? -thomas jenkins
+-    # return re.sub("^file:/{,2}", "", str(gnomevfs.URI(file)))
+-    return file
++    # Otherwise, normalize path (backward compatibility)
++    return os.path.abspath(os.path.expanduser(file_or_uri))
+ 
+ 
+-def file_read(file):
++def file_read(file_or_uri):
+     "Reads data from a file"
+ 
+-    try:
+-        if file is None:
+-            raise IOError
++    # TODO GTK4: If DataFile stores GFile, this can accept GFile directly:
++    #   def file_read(gfile):
++    #       if gfile is None: raise IOError
++    #       ok, contents, etag = gfile.load_contents()
++    #       return contents
+ 
+-        ok, contents, etag = Gio.File.new_for_path(file).load_contents()
+-        return contents
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
++        raise IOError
+ 
++    try:
++        ok, contents, etag = gfile.load_contents()
++        return contents
+     except GLib.GError:
+         raise IOError
+ 
+ 
+-def file_write(file, data):
++def file_write(file_or_uri, data):
+     "Writes data to file"
+ 
+-    try:
+-        if file is None:
+-            raise IOError
++    # TODO GTK4: If DataFile stores GFile, this can accept GFile directly:
++    #   def file_write(gfile, data):
++    #       if gfile is None: raise IOError
++    #       ... rest of function works with gfile directly
+ 
+-        if data is None:
+-            data = ""
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
++        raise IOError
+ 
+-        if isinstance(data, str):
+-            data = data.encode()
++    if data is None:
++        data = ""
+ 
+-        ok, etag = Gio.File.new_for_path(file).replace_contents(data, None, True, Gio.FileCreateFlags.REPLACE_DESTINATION, None)
+-        return ok
++    if isinstance(data, str):
++        data = data.encode()
+ 
++    try:
++        ok, etag = gfile.replace_contents(data, None, True, Gio.FileCreateFlags.REPLACE_DESTINATION, None)
++        return ok
+     except GLib.GError:
+         raise IOError
++
++
++def file_get_display_name(file_or_uri):
++    "Gets a human-readable filename from URI or path using GIO's parse_name. Never returns portal paths or raw URIs."
++
++    # TODO GTK4: If DataFile stores GFile, this can accept GFile directly:
++    #   def file_get_display_name(gfile):
++    #       if gfile is None: return _("Untitled file")
++    #       parse_name = gfile.get_parse_name()
++    #       # If parse_name looks like a portal path, use basename instead
++    #       if parse_name and _is_portal_path(parse_name):
++    #           return gfile.get_basename() or _("Untitled file")
++    #       return parse_name or gfile.get_basename() or _("Untitled file")
++
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
++        return _("Untitled file")
++
++    # Use get_parse_name() for user-friendly display names
++    parse_name = gfile.get_parse_name()
++
++    # If parse_name looks like a portal document path (temporary sandbox path),
++    # use basename instead to avoid showing /run/user/.../doc/... or /run/flatpak/doc/... to users
++    if parse_name and _is_portal_path(parse_name):
++        basename = gfile.get_basename()
++        if basename:
++            return basename
++        return _("Untitled file")
++
++    if parse_name:
++        return parse_name
++
++    # Fallback to basename if parse_name is not available
++    basename = gfile.get_basename()
++    if basename:
++        return basename
++
++    # Last resort: return a generic name rather than exposing internal paths/URIs
++    return _("Untitled file")
++
++
++def _is_portal_path(path):
++    "Checks if a path looks like a portal document path (internal implementation detail, not for users)"
++
++    if not path or not isinstance(path, str):
++        return False
++
++    # Portal documents can be in /run/user/*/doc/ or /run/flatpak/doc/
++    return (path.startswith("/run/user/") and "/doc/" in path) or \
++           (path.startswith("/run/flatpak/doc/"))
++
++
++def file_get_display_path(file_or_uri):
++    "Gets a user-friendly full path for display in statusbar messages. Shows full path when available, filename for portal documents."
++
++    gfile = as_gfile(file_or_uri)
++    if gfile is None:
++        return _("Untitled file")
++
++    # Use get_parse_name() for user-friendly display names
++    parse_name = gfile.get_parse_name()
++
++    # If it's a portal path, show only the filename (we don't have the real path)
++    if parse_name and _is_portal_path(parse_name):
++        basename = gfile.get_basename()
++        if basename:
++            return basename
++        return _("Untitled file")
++
++    # For regular files, show the full parse_name (user-friendly path)
++    if parse_name:
++        return parse_name
++
++    # Fallback to basename if parse_name is not available
++    basename = gfile.get_basename()
++    if basename:
++        return basename
++
++    return _("Untitled file")
+diff --git a/src/revelation.py b/src/revelation.py
+index 8ae20d4..50ba9e5 100644
+--- a/src/revelation.py
++++ b/src/revelation.py
+@@ -571,10 +571,28 @@ class Revelation(ui.App):
+             self.window.get_action_group("file-exists").lookup_action(action).set_enabled(file is not None)
+ 
+         if file is not None:
+-            self.window.set_title(os.path.basename(file))
++            self.window.set_title(io.file_get_display_name(file))
+ 
++            # Note: os.chdir() is deprecated for GTK apps and can break portal sandbox semantics
++            # We keep it for backward compatibility with relative paths, but only for local file:// URIs
+             if io.file_is_local(file):
+-                os.chdir(os.path.dirname(file))
++                if file and not file.startswith("file://"):
++                    # It's a plain path
++                    try:
++                        os.chdir(os.path.dirname(file))
++                    except (OSError, ValueError):
++                        pass  # Ignore chdir errors (e.g., file in root, deleted parent dir)
++                elif file and file.startswith('file://'):
++                    # Extract path from file:// URI
++                    try:
++                        gfile = Gio.File.new_for_uri(file)
++                        parent = gfile.get_parent()
++                        if parent:
++                            parent_path = parent.get_path()
++                            if parent_path:
++                                os.chdir(parent_path)
++                    except (GLib.GError, OSError, ValueError):
++                        pass  # Ignore chdir errors
+ 
+         else:
+             self.window.set_title('[' + _('New file') + ']')
+@@ -682,6 +700,7 @@ class Revelation(ui.App):
+         "Callback for changed file"
+ 
+         try:
++            # 'file' parameter is already a display name (emitted by DataFile)
+             if dialog.FileChanged(self.window, file).run():
+                 self.file_open(self.datafile.get_file(), self.datafile.get_password())
+ 
+@@ -1038,35 +1057,35 @@ class Revelation(ui.App):
+                     old_handler = datafile.get_handler()
+                     # Load the revelation fileversion one handler
+                     datafile.set_handler(datahandler.Revelation)
+-                    dialog.Info(self.window, _('Old file format'), _('Revelation detected that \'%s\' file has the old and actually non-secure file format. It is strongly recommended to save this file with the new format. Revelation will do it automatically if you press save after opening the file.') % file).run()
++                    dialog.Info(self.window, _('Old file format'), _('Revelation detected that \'%s\' file has the old and actually non-secure file format. It is strongly recommended to save this file with the new format. Revelation will do it automatically if you press save after opening the file.') % io.file_get_display_name(file)).run()
+ 
+             while True:
+                 try:
+-                    result = datafile.load(file, password, lambda: dialog.PasswordOpen(self.window, os.path.basename(file)).run())
++                    result = datafile.load(file, password, lambda: dialog.PasswordOpen(self.window, io.file_get_display_name(file)).run())
+                     break
+ 
+                 except datahandler.PasswordError:
+-                    dialog.Error(self.window, _('Incorrect password'), _('The password you entered for the file \'%s\' was not correct.') % file).run()
++                    dialog.Error(self.window, _('Incorrect password'), _('The password you entered for the file \'%s\' was not correct.') % io.file_get_display_name(file)).run()
+ 
+         except datahandler.FormatError:
+             self.statusbar.set_status(_('Open failed'))
+-            dialog.Error(self.window, _('Invalid file format'), _('The file \'%s\' contains invalid data.') % file).run()
++            dialog.Error(self.window, _('Invalid file format'), _('The file \'%s\' contains invalid data.') % io.file_get_display_name(file)).run()
+ 
+         except (datahandler.DataError, entry.EntryTypeError, entry.EntryFieldError):
+             self.statusbar.set_status(_('Open failed'))
+-            dialog.Error(self.window, _('Unknown data'), _('The file \'%s\' contains unknown data. It may have been created by a newer version of Revelation.') % file).run()
++            dialog.Error(self.window, _('Unknown data'), _('The file \'%s\' contains unknown data. It may have been created by a newer version of Revelation.') % io.file_get_display_name(file)).run()
+ 
+         except datahandler.VersionError:
+             self.statusbar.set_status(_('Open failed'))
+-            dialog.Error(self.window, _('Unknown data version'), _('The file \'%s\' has a future version number, please upgrade Revelation to open it.') % file).run()
++            dialog.Error(self.window, _('Unknown data version'), _('The file \'%s\' has a future version number, please upgrade Revelation to open it.') % io.file_get_display_name(file)).run()
+ 
+         except datahandler.DetectError:
+             self.statusbar.set_status(_('Open failed'))
+-            dialog.Error(self.window, _('Unable to detect filetype'), _('The file type of the file \'%s\' could not be automatically detected. Try specifying the file type manually.') % file).run()
++            dialog.Error(self.window, _('Unable to detect filetype'), _('The file type of the file \'%s\' could not be automatically detected. Try specifying the file type manually.') % io.file_get_display_name(file)).run()
+ 
+         except IOError:
+             self.statusbar.set_status(_('Open failed'))
+-            dialog.Error(self.window, _('Unable to open file'), _('The file \'%s\' could not be opened. Make sure that the file exists, and that you have permissions to open it.') % file).run()
++            dialog.Error(self.window, _('Unable to open file'), _('The file \'%s\' could not be opened. Make sure that the file exists, and that you have permissions to open it.') % io.file_get_display_name(file)).run()
+ 
+         # If we switched the datahandlers before we need to switch back to the
+         # version2 handler here, to ensure a seamless version upgrade on save
+@@ -1386,7 +1405,7 @@ class Revelation(ui.App):
+             self.entryclipboard.clear()
+             self.entrystore.clear()
+             self.undoqueue.clear()
+-            self.statusbar.set_status(_('Closed file %s') % self.datafile.get_file())
++            self.statusbar.set_status(_('Closed file %s') % self.datafile.get_file_display_path())
+             self.datafile.close()
+ 
+             return True
+@@ -1403,20 +1422,20 @@ class Revelation(ui.App):
+             datafile = io.DataFile(handler)
+ 
+             if datafile.get_handler().encryption:
+-                password = dialog.PasswordSave(self.window, file).run()
++                password = dialog.PasswordSave(self.window, io.file_get_display_name(file)).run()
+ 
+             else:
+                 dialog.FileSaveInsecure(self.window).run()
+                 password = None
+ 
+             datafile.save(self.entrystore, file, password)
+-            self.statusbar.set_status(_('Data exported to %s') % datafile.get_file())
++            self.statusbar.set_status(_('Data exported to %s') % datafile.get_file_display_path())
+ 
+         except dialog.CancelError:
+             self.statusbar.set_status(_('Export cancelled'))
+ 
+         except IOError:
+-            dialog.Error(self.window, _('Unable to write to file'), _('The file \'%s\' could not be opened for writing. Make sure that you have the proper permissions to write to it.') % file).run()
++            dialog.Error(self.window, _('Unable to write to file'), _('The file \'%s\' could not be opened for writing. Make sure that you have the proper permissions to write to it.') % io.file_get_display_name(file)).run()
+             self.statusbar.set_status(_('Export failed'))
+ 
+     def file_import(self):
+@@ -1436,7 +1455,7 @@ class Revelation(ui.App):
+                     (paths, entrystore)
+                 )
+ 
+-                self.statusbar.set_status(_('Data imported from %s') % datafile.get_file())
++                self.statusbar.set_status(_('Data imported from %s') % datafile.get_file_display_path())
+ 
+             self.__file_autosave()
+ 
+@@ -1546,7 +1565,7 @@ class Revelation(ui.App):
+ 
+             self.file_locked = False
+             self.locktimer.start(60 * self.config.get_int("file-autolock-timeout"))
+-            self.statusbar.set_status(_('Opened file %s') % self.datafile.get_file())
++            self.statusbar.set_status(_('Opened file %s') % self.datafile.get_file_display_path())
+ 
+         except dialog.CancelError:
+             self.statusbar.set_status(_('Open cancelled'))
+@@ -1559,11 +1578,11 @@ class Revelation(ui.App):
+                 file = dialog.SaveFileSelector(self.window).run()
+ 
+             if password is None:
+-                password = dialog.PasswordSave(self.window, file).run()
++                password = dialog.PasswordSave(self.window, io.file_get_display_name(file)).run()
+ 
+             self.datafile.save(self.entrystore, file, password)
+             self.entrystore.changed = False
+-            self.statusbar.set_status(_('Data saved to file %s') % file)
++            self.statusbar.set_status(_('Data saved to file %s') % io.file_get_display_path(file))
+ 
+             return True
+ 
+@@ -1572,7 +1591,7 @@ class Revelation(ui.App):
+             return False
+ 
+         except IOError:
+-            dialog.Error(self.window, _('Unable to save file'), _('The file \'%s\' could not be opened for writing. Make sure that you have the proper permissions to write to it.') % file).run()
++            dialog.Error(self.window, _('Unable to save file'), _('The file \'%s\' could not be opened for writing. Make sure that you have the proper permissions to write to it.') % io.file_get_display_name(file)).run()
+             self.statusbar.set_status(_('Save failed'))
+             return False
+ 
+-- 
+2.51.1
+

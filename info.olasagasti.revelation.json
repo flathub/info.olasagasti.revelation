@@ -1,69 +1,89 @@
 {
-    "app-id": "info.olasagasti.revelation",
-    "runtime" : "org.gnome.Platform",
-    "runtime-version" : "42",
-    "sdk" : "org.gnome.Sdk",
-    "command" : "revelation",
-    "finish-args" : [
-        "--share=ipc",
-        "--socket=fallback-x11",
-        "--socket=wayland",
-        "--filesystem=xdg-run/gvfs",
-        "--talk-name=org.gnome.ScreenSaver"
-    ],
-    "modules" : [
+  "app-id": "info.olasagasti.revelation",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "49",
+  "sdk": "org.gnome.Sdk",
+  "command": "revelation",
+
+  "finish-args": [
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--filesystem=xdg-run/gvfs",
+    "--talk-name=org.gnome.ScreenSaver",
+    "--env=GTK_USE_PORTAL=1"
+  ],
+
+  "build-options": {
+    "env": {
+      "LC_ALL": "C.UTF-8",
+      "SOURCE_DATE_EPOCH": "1"
+    }
+  },
+
+  "modules": [
+    {
+      "name": "libpwquality",
+      "buildsystem": "autotools",
+      "config-opts": [
+        "--with-python-binary=python3"
+      ],
+      "sources": [
         {
-            "name" : "libpwquality",
-            "buildsystem" : "autotools",
-            "config-opts": [
-                "--with-python-binary=python3"
-            ],
-            "sources" : [
-                {
-                    "type" : "archive",
-                    "url" : "https://github.com/libpwquality/libpwquality/releases/download/libpwquality-1.4.4/libpwquality-1.4.4.tar.bz2",
-                    "sha256" : "d43baf23dc6887fe8f8e9b75cabaabc5f4bbbaa0f9eff44278d276141752a545"
-                }
-            ]
-        },
-        {
-            "name" : "pycryptodomex",
-            "buildsystem": "simple",
-            "build-commands": [
-                "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} pycryptodomex "
-            ],
-            "sources" : [
-                {
-                    "type" : "file",
-                    "url" : "https://files.pythonhosted.org/packages/f5/79/9d9206688385d1e7a5ff925e7aab1d685636256e34a409037aa7adbbe611/pycryptodomex-3.9.8.tar.gz",
-                    "sha256" : "48cc2cfc251f04a6142badeb666d1ff49ca6fdfc303fd72579f62b768aaa52b9"
-                }
-            ]
-        },
-        {
-            "name" : "defusedxml",
-            "buildsystem": "simple",
-            "build-commands": [
-                "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} defusedxml"
-            ],
-            "sources" : [
-                {
-                    "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz",
-                    "sha256": "1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69"
-                }
-            ]
-        },
-        {
-            "name" : "revelation",
-            "buildsystem" : "meson",
-            "sources" : [
-                {
-                    "type" : "archive",
-                    "url" : "https://github.com/mikelolasagasti/revelation/releases/download/revelation-0.5.5/revelation-0.5.5.tar.xz",
-                    "sha256" : "a20c4191595466dc90b90b0f7c4615a599974327152a4d2af87f506134ddce8f"
-                }
-            ]
+          "type": "archive",
+          "url": "https://github.com/libpwquality/libpwquality/releases/download/libpwquality-1.4.5/libpwquality-1.4.5.tar.bz2",
+          "sha256": "6fcf18b75d305d99d04d2e42982ed5b787a081af2842220ed63287a2d6a10988"
         }
-    ]
+      ],
+      "cleanup": ["/include", "/lib/pkgconfig", "/share/man", "/share/gtk-doc", "*.la"]
+    },
+    {
+      "name": "pycryptodomex",
+      "buildsystem": "simple",
+      "build-commands": [
+        "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} pycryptodomex "
+      ],
+      "sources": [
+        {
+          "type": "file",
+          "url": "https://files.pythonhosted.org/packages/c9/85/e24bf90972a30b0fcd16c73009add1d7d7cd9140c2498a68252028899e41/pycryptodomex-3.23.0.tar.gz",
+          "sha256": "71909758f010c82bc99b0abf4ea12012c98962fbf0583c2164f8b84533c2e4da"
+        }
+      ],
+      "cleanup": ["*.egg-info"]
+    },
+    {
+      "name": "defusedxml",
+      "buildsystem": "simple",
+      "build-commands": [
+        "pip3 install --no-index --no-build-isolation --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} defusedxml"
+      ],
+      "sources": [
+        {
+          "type": "file",
+          "url": "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz",
+          "sha256": "1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69"
+        }
+      ],
+      "cleanup": ["*.egg-info"]
+    },
+    {
+      "name": "revelation",
+      "buildsystem": "meson",
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://github.com/mikelolasagasti/revelation/releases/download/revelation-0.5.6/revelation-0.5.6.tar.xz",
+          "sha256": "ceffde10f389e4ec6653e895a2a15ff168d97a51299495c9e089af8a3bef7c53"
+        },
+        {
+          "type": "patch",
+          "paths": [
+            "0001-flatpak-Add-portal-compatibility-and-modernize-file-.patch",
+            "0001-appstream-Fix-validation-errors-and-modernize-metada.patch"
+          ]
+        }
+      ]
+    }
+  ]
 }
